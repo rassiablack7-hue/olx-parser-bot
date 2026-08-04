@@ -1,24 +1,15 @@
-import asyncio
-import logging
 import os
-import json
 import re
-from pathlib import Path
-
-import httpx
+import time
+import requests
 from bs4 import BeautifulSoup
-from telegram import Bot
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+# Данные твоего Telegram бота
+BOT_TOKEN = "8675707834:AAHB2VIOpYyvzn-yJhv3EtrNZ8Flu8UxYu0"
+CHAT_ID = "1806974839"
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8675707834:AAHB2VIOpYyvzn-yJhv3EtrNZ8Flu8UxYu0")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1806974839")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "30"))
-SEEN_FILE = Path("seen_ids.json")
-SCRAPER_KEY = "70e24f105bb051b79d46e7c52a85b2be"
-
-MAX_PRICES = {
+# Твоя таблица максимальных цен для Астаны (в KZT)
+PRICE_LIMITS = {
     "iphone 16 pro max": 325000,
     "iphone 16 pro": 325000,
     "iphone 16 plus": 280000,
@@ -36,146 +27,108 @@ MAX_PRICES = {
     "iphone 13 mini": 90000,
     "iphone 13": 90000,
 }
+DEFAULT_MAX_PRICE = 250000
 
-bot = Bot(token=TELEGRAM_TOKEN)
+# Поисковый URL для Астаны с фильтрацией до 325 000 KZT
+BASE_URL = "https://www.olx.kz/d/elektronika/telefony-i-accessories/mobilnye-telefony-smartfony/astana/q-iphone/?search%5Bfilter_float_price%3Ato%5D=325000"
 
-def load_seen() -> set:
-    if SEEN_FILE.exists():
-        return set(json.loads(SEEN_FILE.read_text()))
-    return set()
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+}
 
-def save_seen(seen: set):
-    SEEN_FILE.write_text(json.dumps(list(seen)))
+# Хранилище отправленных объявлений в памяти
+seen_ads = set()
 
-def match_model(title: str) -> tuple[str | None, int | None]:
-    title_lower = title.lower()
-    for model, max_price in sorted(MAX_PRICES.items(), key=lambda x: -len(x[0])):
-        if model in title_lower:
-            return model, max_price
-    return None, None
-
-def parse_html(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
-    cards = soup.select("div[data-cy='l-card']")
-    logger.info(f"Cards found: {len(cards)}")
-    for card in cards:
-        try:
-            link = card.select_one("a[href]")
-            if not link:
-                continue
-            href = link["href"]
-            m = re.search(r"-(\d+)\.html", href)
-            if not m:
-                continue
-            ad_id = m.group(1)
-            title_tag = card.select_one("h4, h6")
-            title = title_tag.get_text(strip=True) if title_tag else ""
-            price_tag = card.select_one("[data-testid='ad-price']")
-            price_text = price_tag.get_text(strip=True) if price_tag else ""
-            digits = re.sub(r"[^\d]", "", price_text)
-            price_value = int(digits) if digits else None
-            location_tag = card.select_one("[data-testid='location-date']")
-            location = location_tag.get_text(strip=True) if location_tag else "Астана"
-            img = card.select_one("img")
-            img_url = img.get("src") if img else None
-            full_url = href if href.startswith("http") else f"https://www.olx.kz{href}"
-            results.append({
-                "id": ad_id, "title": title, "price_text": price_text,
-                "price_value": price_value, "location": location,
-                "url": full_url, "image": img_url,
-            })
-        except Exception as e:
-            logger.warning(f"Card error: {e}")
-    return results
-
-async def fetch_listings() -> list[dict]:
-    results = []
-    queries = ["iphone 13", "iphone 14", "iphone 15", "iphone 16"]
-
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-        for q in queries:
-            try:
-                # Используем ScraperAPI с параметром render=true
-                target = f"https://www.olx.kz/elektronika/telefony-i-aksesuary/mobilnye-telefony-smartfony/astana/?search%5Bq%5D={q.replace(' ', '+')}"
-                url = f"https://api.scraperapi.com/?api_key={SCRAPER_KEY}&url={target}&render=true&country_code=kz"
-                resp = await client.get(url)
-                logger.info(f"'{q}' -> {resp.status_code}, len={len(resp.text)}")
-
-                if resp.status_code == 200:
-                    cards = parse_html(resp.text)
-                    for card in cards:
-                        model, max_price = match_model(card["title"])
-                        if not model or not card["price_value"]:
-                            continue
-                        if card["price_value"] >= max_price:
-                            continue
-                        results.append({
-                            "id": card["id"], "title": card["title"],
-                            "price": card["price_text"],
-                            "savings": max_price - card["price_value"],
-                            "location": card["location"],
-                            "url": card["url"], "image": card["image"],
-                        })
-            except Exception as e:
-                logger.error(f"Error '{q}': {e}")
-            await asyncio.sleep(5)
-
-    seen_ids, unique = set(), []
-    for r in results:
-        if r["id"] not in seen_ids:
-            seen_ids.add(r["id"])
-            unique.append(r)
-    return unique
-
-async def send_listing(listing: dict):
-    savings_text = f"💸 Выгода: {listing['savings']:,} ₸\n".replace(",", " ") if listing.get("savings") else ""
-    text = (
-        f"📱 {listing['title']}\n"
-        f"💰 Цена: {listing['price']}\n"
-        f"{savings_text}"
-        f"📍 {listing['location']}\n"
-        f"🔗 {listing['url']}"
-    )
+def send_telegram_msg(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML"
+    }
     try:
-        if listing.get("image"):
-            await bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=listing["image"], caption=text)
-        else:
-            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        logger.error(f"Send error: {e}")
-        try:
-            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
-        except:
-            pass
+        print(f"Ошибка отправки в ТГ: {e}")
 
-async def main():
-    logger.info("🚀 iPhone Parser Bot — Астана")
-    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="🚀 Бот запущен! Слежу за iPhone в Астане...")
-    seen = load_seen()
-    if not seen:
-        logger.info("First run — saving existing IDs...")
-        listings = await fetch_listings()
-        for l in listings:
-            seen.add(l["id"])
-        save_seen(seen)
-        logger.info(f"Saved {len(seen)} IDs.")
-    while True:
-        try:
-            listings = await fetch_listings()
-            new = [l for l in listings if l["id"] not in seen]
-            if new:
-                logger.info(f"✅ {len(new)} new!")
-                for listing in new:
-                    await send_listing(listing)
-                    seen.add(listing["id"])
-                    await asyncio.sleep(1)
-                save_seen(seen)
-            else:
-                logger.info("No new deals")
-        except Exception as e:
-            logger.error(f"Error: {e}")
-        await asyncio.sleep(CHECK_INTERVAL)
+def extract_price(price_text):
+    digits = re.sub(r"\D", "", price_text)
+    return int(digits) if digits else None
+
+def filter_iphone(title, price):
+    title_lower = title.lower()
+    
+    # Сначала проверяем точные совпадения по длинным названиям
+    sorted_models = sorted(PRICE_LIMITS.keys(), key=lambda x: len(x), reverse=True)
+    
+    for model in sorted_models:
+        if model in title_lower:
+            limit = PRICE_LIMITS[model]
+            if price <= limit:
+                return True, model, limit
+            return False, model, limit
+
+    # Если модель четко не распознана, но в заголовке есть iPhone / айфон
+    if "iphone" in title_lower or "айфон" in title_lower:
+        if price <= DEFAULT_MAX_PRICE:
+            return True, "другой iphone", DEFAULT_MAX_PRICE
+        return False, "другой iphone", DEFAULT_MAX_PRICE
+
+    return False, None, 0
+
+def check_olx():
+    print("Парсим OLX Астана...")
+    try:
+        res = requests.get(BASE_URL, headers=HEADERS, timeout=10)
+        if res.status_code != 200:
+            print(f"Ошибка сайта: статус {res.status_code}")
+            return
+
+        soup = BeautifulSoup(res.text, "html.parser")
+        cards = soup.find_all("div", data_testid="ad-card") or soup.find_all("div", class_=re.compile("css-"))
+        
+        for card in cards:
+            title_el = card.find("h6") or card.find("h4")
+            price_el = card.find("p", data_testid="ad-price")
+            link_el = card.find("a", href=True)
+
+            if not title_el or not price_el or not link_el:
+                continue
+
+            title = title_el.get_text(strip=True)
+            price = extract_price(price_el.get_text(strip=True))
+            
+            link = link_el["href"]
+            if not link.startswith("http"):
+                link = "https://www.olx.kz" + link
+            
+            clean_link = link.split("#")[0].split("?")[0]
+
+            if price and clean_link not in seen_ads:
+                is_valid, model_name, limit = filter_iphone(title, price)
+                
+                # Запоминаем объявление
+                seen_ads.add(clean_link)
+                
+                if is_valid:
+                    msg = (
+                        f"⚡️ <b>Новый iPhone в Астане!</b>\n\n"
+                        f"📱 <b>Модель:</b> {model_name.upper()}\n"
+                        f"📝 <b>Заголовок:</b> {title}\n"
+                        f"💵 <b>Цена:</b> {price:,} KZT (Лимит: {limit:,} KZT)\n\n"
+                        f"🔗 <a href='{clean_link}'>Открыть на OLX.kz</a>"
+                    )
+                    send_telegram_msg(msg)
+                    time.sleep(1)
+                    
+    except Exception as e:
+        print(f"Ошибка во время парсинга: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("Бот запущен на Railway (проверка каждые 15 секунд)!")
+    while True:
+        check_olx()
+        # Задержка 15 секунд
+        time.sleep(15)
+    
