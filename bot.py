@@ -36,17 +36,6 @@ MAX_PRICES = {
     "iphone 13": 90000,
 }
 
-# OLX.kz API — Астана, категория телефоны
-API_URL = "https://www.olx.kz/api/v1/offers/"
-API_PARAMS = {
-    "offset": 0,
-    "limit": 50,
-    "category_id": 1307,  # Мобильные телефоны
-    "region_id": 4,       # Астана
-    "query": "iphone",
-    "sort_by": "created_at:desc",
-}
-
 bot = Bot(token=TELEGRAM_TOKEN)
 
 def load_seen() -> set:
@@ -57,16 +46,6 @@ def load_seen() -> set:
 def save_seen(seen: set):
     SEEN_FILE.write_text(json.dumps(list(seen)))
 
-def extract_price(offer: dict) -> int | None:
-    try:
-        for param in offer.get("params", []):
-            if param.get("key") == "price":
-                value = param.get("value", {})
-                return int(value.get("value", 0))
-    except:
-        pass
-    return None
-
 def match_model(title: str) -> tuple[str | None, int | None]:
     title_lower = title.lower()
     for model, max_price in sorted(MAX_PRICES.items(), key=lambda x: -len(x[0])):
@@ -75,56 +54,98 @@ def match_model(title: str) -> tuple[str | None, int | None]:
     return None, None
 
 async def fetch_listings() -> list[dict]:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json",
-    }
     results = []
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            resp = await client.get(API_URL, params=API_PARAMS, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            offers = data.get("data", [])
-            logger.info(f"Got {len(offers)} offers from API")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Referer": "https://www.olx.kz/",
+        "Origin": "https://www.olx.kz",
+    }
 
-            for offer in offers:
-                try:
-                    ad_id = str(offer.get("id", ""))
-                    title = offer.get("title", "")
-                    url = offer.get("url", "")
-                    price_value = extract_price(offer)
-                    price_text = f"{price_value:,} ₸" if price_value else "Цена не указана"
-                    location = offer.get("location", {}).get("city", {}).get("name", "")
-                    photos = offer.get("photos", [])
-                    img_url = photos[0].get("link", "").replace("{width}", "400").replace("{height}", "400") if photos else None
+    # Ищем каждую модель отдельно через внутренний поиск OLX
+    search_queries = ["iphone 13", "iphone 14", "iphone 15", "iphone 16"]
 
-                    model, max_price = match_model(title)
-                    if not model:
-                        continue
-                    if price_value and max_price and price_value >= max_price:
-                        continue
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        for query in search_queries:
+            try:
+                url = f"https://www.olx.kz/elektronika/telefony-i-aksesuary/astana/q-{query.replace(' ', '-')}/"
+                resp = await client.get(url, headers=headers)
+                
+                # Ищем JSON данные внутри HTML (Next.js __NEXT_DATA__)
+                match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', resp.text, re.DOTALL)
+                if not match:
+                    logger.warning(f"No __NEXT_DATA__ for {query}")
+                    continue
 
-                    savings = max_price - price_value if price_value and max_price else None
+                data = json.loads(match.group(1))
+                offers = (
+                    data.get("props", {})
+                    .get("pageProps", {})
+                    .get("listing", {})
+                    .get("listing", {})
+                    .get("ads", [])
+                )
+                logger.info(f"'{query}': got {len(offers)} offers")
 
-                    results.append({
-                        "id": ad_id,
-                        "title": title,
-                        "price": price_text,
-                        "price_value": price_value,
-                        "savings": savings,
-                        "location": location,
-                        "url": url,
-                        "image": img_url,
-                    })
-                except Exception as e:
-                    logger.warning(f"Error processing offer: {e}")
-        except Exception as e:
-            logger.error(f"API error: {e}")
-    return results
+                for offer in offers:
+                    try:
+                        ad_id = str(offer.get("id", ""))
+                        title = offer.get("title", "")
+                        url_ad = offer.get("url", "")
+                        location = offer.get("location", {}).get("cityName", "")
+                        photos = offer.get("photos", [])
+                        img_url = photos[0] if photos else None
+
+                        # Цена
+                        price_value = None
+                        price_text = "Цена не указана"
+                        for param in offer.get("params", []):
+                            if param.get("key") == "price":
+                                raw = param.get("value", {}).get("value", "")
+                                digits = re.sub(r"[^\d]", "", str(raw))
+                                if digits:
+                                    price_value = int(digits)
+                                    price_text = f"{price_value:,} ₸".replace(",", " ")
+                                break
+
+                        model, max_price = match_model(title)
+                        if not model:
+                            continue
+                        if price_value and max_price and price_value >= max_price:
+                            continue
+
+                        savings = max_price - price_value if price_value and max_price else None
+
+                        results.append({
+                            "id": ad_id,
+                            "title": title,
+                            "price": price_text,
+                            "price_value": price_value,
+                            "savings": savings,
+                            "location": location,
+                            "url": url_ad,
+                            "image": img_url,
+                        })
+                    except Exception as e:
+                        logger.warning(f"Offer error: {e}")
+
+                await asyncio.sleep(2)
+
+            except Exception as e:
+                logger.error(f"Fetch error for '{query}': {e}")
+
+    # Убираем дубли
+    seen_ids = set()
+    unique = []
+    for r in results:
+        if r["id"] not in seen_ids:
+            seen_ids.add(r["id"])
+            unique.append(r)
+    return unique
 
 async def send_listing(listing: dict):
-    savings_text = f"💸 Выгода: *{listing['savings']:,} ₸*\n" if listing.get("savings") else ""
+    savings_text = f"💸 Выгода: *{listing['savings']:,} ₸*\n".replace(",", " ") if listing.get("savings") else ""
     text = (
         f"📱 *{listing['title']}*\n"
         f"💰 Цена: *{listing['price']}*\n"
@@ -145,7 +166,7 @@ async def send_listing(listing: dict):
             pass
 
 async def main():
-    logger.info("🚀 iPhone Parser Bot — Астана (OLX.kz API)")
+    logger.info("🚀 iPhone Parser Bot — Астана (OLX.kz)")
     seen = load_seen()
 
     if not seen:
@@ -161,7 +182,7 @@ async def main():
             listings = await fetch_listings()
             new = [l for l in listings if l["id"] not in seen]
             if new:
-                logger.info(f"✅ {len(new)} new deal(s) found!")
+                logger.info(f"✅ {len(new)} new deal(s)!")
                 for listing in new:
                     await send_listing(listing)
                     seen.add(listing["id"])
