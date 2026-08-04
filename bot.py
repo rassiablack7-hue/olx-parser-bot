@@ -29,14 +29,18 @@ PRICE_LIMITS = {
 }
 DEFAULT_MAX_PRICE = 250000
 
-# Страница поиска iPhone в Астане
-URL = "https://www.olx.kz/elektronika/telefony-i-accessories/mobilnye-telefony-smartfony/astana/q-iphone/?search%5Bfilter_float_price%3Ato%5D=325000"
+# Рабочий базовый URL категории смартфонов Астаны
+BASE_URL = "https://www.olx.kz/elektronika/telefony-i-accessories/mobilnye-telefony-smartfony/astana/"
+
+PARAMS = {
+    "search[search_term]": "iphone",
+    "search[filter_float_price:to]": "325000"
+}
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Cache-Control": "max-age=0"
 }
 
 seen_ads = set()
@@ -86,10 +90,10 @@ def filter_iphone(title, price):
     return False, None, 0
 
 def check_olx():
-    print("Сканирование HTML OLX.kz...")
+    print("Сканирование OLX.kz...")
     try:
         session = requests.Session()
-        res = session.get(URL, headers=HEADERS, timeout=15)
+        res = session.get(BASE_URL, params=PARAMS, headers=HEADERS, timeout=15)
         
         if res.status_code != 200:
             print(f"Ошибка HTTP: {res.status_code}")
@@ -97,12 +101,12 @@ def check_olx():
 
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # Находим все карточки объявлений
+        # Поиск всех карточек объявлений
         cards = soup.find_all("div", data_testid="ad-card")
         if not cards:
-            cards = soup.find_all("div", class_=re.compile("css-1sw7q4x|css-l9212r"))
+            cards = soup.find_all("div", class_=re.compile("css-"))
 
-        print(f"Найдено карточек на странице: {len(cards)}")
+        print(f"Успешный ответ (200 OK)! Найдено карточек: {len(cards)}")
 
         for card in cards:
             link_el = card.find("a", href=True)
@@ -119,7 +123,6 @@ def check_olx():
             if not href.startswith("http"):
                 href = "https://www.olx.kz" + href
             
-            # Уникальный ID объявления из ссылки
             ad_id = href.split("#")[0].split("?")[0]
 
             if ad_id not in seen_ads:
@@ -145,7 +148,8 @@ def check_olx():
         print(f"Ошибка парсинга: {e}")
 
 if __name__ == "__main__":
-    print("Бот запущен на HTML-парсинг!")
+    print("Бот запущен!")
     while True:
         check_olx()
         time.sleep(20)
+    
