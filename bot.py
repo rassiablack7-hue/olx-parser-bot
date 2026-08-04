@@ -18,7 +18,6 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1806974839")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
 SEEN_FILE = Path("seen_ids.json")
 
-# Максимальные цены (тенге) — если дешевле, отправляем
 MAX_PRICES = {
     "iphone 16 pro max": 325000,
     "iphone 16 pro": 325000,
@@ -38,43 +37,35 @@ MAX_PRICES = {
     "iphone 13": 90000,
 }
 
-# OLX Казахстан — Астана — поиск iPhone
 OLX_URLS = [
-    "https://www.olx.kz/astana/elektronika/telefony-i-aksessuary/mobilnye-telefony-smartfony/?search%5Bfilter_float_price%3Ato%5D=325000&search%5Bq%5D=iphone",
+    "https://www.olx.kz/elektronika/telefony-i-aksesuary/astana/q-iphone/",
 ]
 
 bot = Bot(token=TELEGRAM_TOKEN)
-
 
 def load_seen() -> set:
     if SEEN_FILE.exists():
         return set(json.loads(SEEN_FILE.read_text()))
     return set()
 
-
 def save_seen(seen: set):
     SEEN_FILE.write_text(json.dumps(list(seen)))
-
 
 def extract_price(text: str) -> int | None:
     digits = re.sub(r"[^\d]", "", text)
     return int(digits) if digits else None
 
-
 def match_model(title: str) -> tuple[str | None, int | None]:
     title_lower = title.lower()
-    # Проверяем от самых длинных моделей к коротким
     for model, max_price in sorted(MAX_PRICES.items(), key=lambda x: -len(x[0])):
         if model in title_lower:
             return model, max_price
     return None, None
 
-
 def parse_listings(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     listings = []
     cards = soup.select("div[data-cy='l-card']")
-
     for card in cards:
         try:
             link_tag = card.select_one("a[href]")
@@ -103,12 +94,11 @@ def parse_listings(html: str) -> list[dict]:
 
             full_url = href if href.startswith("http") else f"https://www.olx.kz{href}"
 
-            # Проверяем модель и цену
             model, max_price = match_model(title)
             if not model:
                 continue
             if price_value and max_price and price_value >= max_price:
-                continue  # Дороже нашего лимита — пропускаем
+                continue
 
             savings = max_price - price_value if price_value and max_price else None
 
@@ -128,7 +118,6 @@ def parse_listings(html: str) -> list[dict]:
             logger.warning(f"Error parsing card: {e}")
     return listings
 
-
 async def fetch_listings() -> list[dict]:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -145,7 +134,6 @@ async def fetch_listings() -> list[dict]:
                 logger.error(f"Fetch error {url}: {e}")
     return all_listings
 
-
 async def send_listing(listing: dict):
     savings_text = f"💸 Выгода: *{listing['savings']:,} ₸*\n" if listing.get("savings") else ""
     text = (
@@ -157,25 +145,15 @@ async def send_listing(listing: dict):
     )
     try:
         if listing.get("image"):
-            await bot.send_photo(
-                chat_id=TELEGRAM_CHAT_ID,
-                photo=listing["image"],
-                caption=text,
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            await bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=listing["image"], caption=text, parse_mode=ParseMode.MARKDOWN)
         else:
-            await bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=text,
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Send error: {e}")
         try:
             await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=ParseMode.MARKDOWN)
         except:
             pass
-
 
 async def main():
     logger.info("🚀 iPhone Parser Bot — Астана (OLX.kz)")
@@ -205,7 +183,6 @@ async def main():
         except Exception as e:
             logger.error(f"Error: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
