@@ -17,6 +17,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8675707834:AAHB2VIOpYyvzn-yJh
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1806974839")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "15"))
 SEEN_FILE = Path("seen_ids.json")
+SCRAPER_KEY = "70e24f105bb051b79d46e7c52a85b2be"
 
 MAX_PRICES = {
     "iphone 16 pro max": 325000,
@@ -37,8 +38,7 @@ MAX_PRICES = {
     "iphone 13": 90000,
 }
 
-BASE_URL = "https://www.olx.kz/elektronika/telefony-i-aksesuary/"
-
+BASE_URL = "https://www.olx.kz/astana/elektronika/telefony-i-aksesuary/"
 bot = Bot(token=TELEGRAM_TOKEN)
 
 def load_seen() -> set:
@@ -60,7 +60,7 @@ def parse_html_cards(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     results = []
     cards = soup.select("div[data-cy='l-card']")
-    logger.info(f"HTML cards found: {len(cards)}")
+    logger.info(f"Cards found: {len(cards)}")
     for card in cards:
         try:
             link = card.select_one("a[href]")
@@ -94,16 +94,12 @@ def parse_html_cards(html: str) -> list[dict]:
 async def fetch_listings() -> list[dict]:
     results = []
     queries = ["iphone+13", "iphone+14", "iphone+15", "iphone+16"]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
         for q in queries:
             try:
-                url = f"{BASE_URL}?search%5Bq%5D={q}"
-                resp = await client.get(url, headers=headers)
+                target_url = f"{BASE_URL}?search%5Bq%5D={q}"
+                scraper_url = f"http://api.scraperapi.com?api_key={SCRAPER_KEY}&url={target_url}&render=true"
+                resp = await client.get(scraper_url)
                 logger.info(f"GET {q} -> {resp.status_code}")
                 cards = parse_html_cards(resp.text)
                 for card in cards:
@@ -120,7 +116,7 @@ async def fetch_listings() -> list[dict]:
                     })
             except Exception as e:
                 logger.error(f"Error '{q}': {e}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
 
     seen_ids, unique = set(), []
     for r in results:
