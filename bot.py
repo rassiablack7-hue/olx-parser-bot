@@ -1,7 +1,8 @@
 import os
 import re
 import time
-import cloudscraper
+import requests
+from bs4 import BeautifulSoup
 
 # Данные твоего Telegram бота
 BOT_TOKEN = "8675707834:AAHB2VIOpYyvzn-yJhv3EtrNZ8Flu8UxYu0"
@@ -28,13 +29,15 @@ PRICE_LIMITS = {
 }
 DEFAULT_MAX_PRICE = 250000
 
-# Запрос к API OLX
-API_URL = "https://www.olx.kz/api/v1/offers/?offset=0&limit=40&query=iphone&filter_float_price%3Ato=325000&city_id=190"
+# Страница поиска iPhone в Астане
+URL = "https://www.olx.kz/elektronika/telefony-i-accessories/mobilnye-telefony-smartfony/astana/q-iphone/?search%5Bfilter_float_price%3Ato%5D=325000"
 
-# Создаем scraper для обхода Cloudflare
-scraper = cloudscraper.create_scraper(
-    browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
-)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "max-age=0"
+}
 
 seen_ads = set()
 
@@ -47,26 +50,13 @@ def send_telegram_msg(text):
         "disable_web_page_preview": False
     }
     try:
-        scraper.post(url, json=payload, timeout=10)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Ошибка отправки в Telegram: {e}")
 
-def get_price_from_item(item):
-    if "price" in item and isinstance(item["price"], dict):
-        val = item["price"].get("value") or item["price"].get("regularPrice", {}).get("value")
-        if val:
-            return int(val)
-            
-    for p in item.get("params", []):
-        if p.get("key") == "price":
-            val = p.get("value", {})
-            if isinstance(val, dict):
-                v = val.get("value")
-                if v:
-                    return int(v)
-            elif isinstance(val, (int, float)):
-                return int(val)
-    return None
+def extract_price(price_str):
+    digits = re.sub(r"\D", "", price_str)
+    return int(digits) if digits else None
 
 def normalize_title(title):
     t = title.lower()
@@ -96,22 +86,41 @@ def filter_iphone(title, price):
     return False, None, 0
 
 def check_olx():
-    print("Сканирование OLX...")
+    print("Сканирование HTML OLX.kz...")
     try:
-        res = scraper.get(API_URL, timeout=15)
+        session = requests.Session()
+        res = session.get(URL, headers=HEADERS, timeout=15)
+        
         if res.status_code != 200:
             print(f"Ошибка HTTP: {res.status_code}")
             return
 
-        data = res.json()
-        items = data.get("data", [])
-        print(f"Получено объявлений из API: {len(items)}")
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        # Находим все карточки объявлений
+        cards = soup.find_all("div", data_testid="ad-card")
+        if not cards:
+            cards = soup.find_all("div", class_=re.compile("css-1sw7q4x|css-l9212r"))
 
-        for item in items:
-            ad_id = str(item.get("id"))
-            title = item.get("title", "")
-            url = item.get("url", "")
-            price = get_price_from_item(item)
+        print(f"Найдено карточек на странице: {len(cards)}")
+
+        for card in cards:
+            link_el = card.find("a", href=True)
+            title_el = card.find("h6") or card.find("h4")
+            price_el = card.find("p", data_testid="ad-price") or card.find("p", class_=re.compile("price"))
+
+            if not link_el or not title_el or not price_el:
+                continue
+
+            title = title_el.get_text(strip=True)
+            price = extract_price(price_el.get_text(strip=True))
+            
+            href = link_el["href"]
+            if not href.startswith("http"):
+                href = "https://www.olx.kz" + href
+            
+            # Уникальный ID объявления из ссылки
+            ad_id = href.split("#")[0].split("?")[0]
 
             if ad_id not in seen_ads:
                 seen_ads.add(ad_id)
@@ -124,7 +133,7 @@ def check_olx():
                             f"📱 <b>Модель:</b> {model_name.upper()}\n"
                             f"📝 <b>Заголовок:</b> {title}\n"
                             f"💵 <b>Цена:</b> {price:,} KZT (Лимит: {limit:,} KZT)\n\n"
-                            f"🔗 <a href='{url}'>Открыть на OLX.kz</a>"
+                            f"🔗 <a href='{href}'>Открыть на OLX.kz</a>"
                         )
                         send_telegram_msg(msg)
                         time.sleep(1)
@@ -133,10 +142,10 @@ def check_olx():
                             print(f"SKIP: {title} ({price} KZT > {limit} KZT)")
 
     except Exception as e:
-        print(f"Ошибка во время сканирования: {e}")
+        print(f"Ошибка парсинга: {e}")
 
 if __name__ == "__main__":
-    print("Бот запущен с обходом Cloudflare!")
+    print("Бот запущен на HTML-парсинг!")
     while True:
         check_olx()
-        time.sleep(15)
+        time.sleep(20)
