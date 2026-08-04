@@ -38,7 +38,7 @@ MAX_PRICES = {
     "iphone 13": 90000,
 }
 
-BASE_URL = "https://www.olx.kz/astana/elektronika/telefony-i-aksesuary/"
+BASE_URL = "https://www.olx.kz/elektronika/telefony-i-aksesuary/astana/"
 bot = Bot(token=TELEGRAM_TOKEN)
 
 def load_seen() -> set:
