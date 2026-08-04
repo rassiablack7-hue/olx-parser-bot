@@ -231,7 +231,8 @@ async def send_listing(listing: dict):
             pass
 
 async def main():
-    logger.info("🚀 iPhone Parser Bot — Астана") await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="🚀 Бот запущен! Слежу за iPhone в Астане...")
+    logger.info("🚀 iPhone Parser Bot — Астана") 
+    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="🚀 Бот запущен! Слежу за iPhone в Астане...")
     seen = load_seen()
     if not seen:
         logger.info("First run — saving existing IDs...")
