@@ -8,14 +8,13 @@ from pathlib import Path
 import httpx
 from bs4 import BeautifulSoup
 from telegram import Bot
-from telegram.constants import ParseMode
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8675707834:AAHB2VIOpYyvzn-yJhv3EtrNZ8Flu8UxYu0")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1806974839")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "15"))
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "30"))
 SEEN_FILE = Path("seen_ids.json")
 SCRAPER_KEY = "70e24f105bb051b79d46e7c52a85b2be"
 
@@ -38,7 +37,6 @@ MAX_PRICES = {
     "iphone 13": 90000,
 }
 
-BASE_URL = "https://www.olx.kz/elektronika/telefony-i-aksesuary/mobilnye-telefony-smartfony/astana/"
 bot = Bot(token=TELEGRAM_TOKEN)
 
 def load_seen() -> set:
@@ -56,7 +54,7 @@ def match_model(title: str) -> tuple[str | None, int | None]:
             return model, max_price
     return None, None
 
-def parse_html_cards(html: str) -> list[dict]:
+def parse_html(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     results = []
     cards = soup.select("div[data-cy='l-card']")
@@ -93,30 +91,35 @@ def parse_html_cards(html: str) -> list[dict]:
 
 async def fetch_listings() -> list[dict]:
     results = []
-    queries = ["iphone+13", "iphone+14", "iphone+15", "iphone+16"]
+    queries = ["iphone 13", "iphone 14", "iphone 15", "iphone 16"]
+
     async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
         for q in queries:
             try:
-                target_url = f"{BASE_URL}?search%5Bq%5D={q}"
-                scraper_url = f"http://api.scraperapi.com?api_key={SCRAPER_KEY}&url={target_url}&render=true"
-                resp = await client.get(scraper_url)
-                logger.info(f"GET {q} -> {resp.status_code}")
-                cards = parse_html_cards(resp.text)
-                for card in cards:
-                    model, max_price = match_model(card["title"])
-                    if not model or not card["price_value"]:
-                        continue
-                    if card["price_value"] >= max_price:
-                        continue
-                    results.append({
-                        "id": card["id"], "title": card["title"],
-                        "price": card["price_text"], "price_value": card["price_value"],
-                        "savings": max_price - card["price_value"],
-                        "location": card["location"], "url": card["url"], "image": card["image"],
-                    })
+                # Используем ScraperAPI с параметром render=true
+                target = f"https://www.olx.kz/elektronika/telefony-i-aksesuary/mobilnye-telefony-smartfony/astana/?search%5Bq%5D={q.replace(' ', '+')}"
+                url = f"https://api.scraperapi.com/?api_key={SCRAPER_KEY}&url={target}&render=true&country_code=kz"
+                resp = await client.get(url)
+                logger.info(f"'{q}' -> {resp.status_code}, len={len(resp.text)}")
+
+                if resp.status_code == 200:
+                    cards = parse_html(resp.text)
+                    for card in cards:
+                        model, max_price = match_model(card["title"])
+                        if not model or not card["price_value"]:
+                            continue
+                        if card["price_value"] >= max_price:
+                            continue
+                        results.append({
+                            "id": card["id"], "title": card["title"],
+                            "price": card["price_text"],
+                            "savings": max_price - card["price_value"],
+                            "location": card["location"],
+                            "url": card["url"], "image": card["image"],
+                        })
             except Exception as e:
                 logger.error(f"Error '{q}': {e}")
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
 
     seen_ids, unique = set(), []
     for r in results:
