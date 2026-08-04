@@ -2,8 +2,8 @@
 """
 OLX monitor for Astana — deploy to Railway.
 Reads settings from environment variables:
-- TELEGRAM_TOKEN (required)
-- TELEGRAM_CHAT_ID (required)
+- 8675707834:AAHB2VIOpYyvzn-yJhv3EtrNZ8Flu8UxYu0 (required)
+- 1806974839 (required)
 - MODELS_JSON (optional) — JSON string mapping model->threshold
 - GLOBAL_MAX (optional) — integer threshold for any iPhone
 - REGION_PATH (optional, default "astana")
