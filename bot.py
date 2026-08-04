@@ -1,51 +1,26 @@
 #!/usr/bin/env python3
-"""
-OLX monitor for Astana — deploy to Railway.
-Reads settings from environment variables:
-- 8675707834:AAHB2VIOpYyvzn-yJhv3EtrNZ8Flu8UxYu0 (required)
-- 1806974839 (required)
-- MODELS_JSON (optional) — JSON string mapping model->threshold
-- GLOBAL_MAX (optional) — integer threshold for any iPhone
-- REGION_PATH (optional, default "astana")
-- INTERVAL_SECONDS (optional, default 300)
-- DATABASE_URL (optional, if provided will use Postgres)
-"""
-import os
-import time
-import re
-import json
-import random
-import logging
+# OLX monitor — берет TELEGRAM_TOKEN и TELEGRAM_CHAT_ID из окружения.
+import os, time, re, json, random, logging
 from datetime import datetime
 from urllib.parse import quote_plus, urljoin
-
 import requests
 from bs4 import BeautifulSoup
 
-# DB imports chosen at runtime
-import sqlite3
-try:
-    import psycopg2
-except Exception:
-    psycopg2 = None
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-# ENV / config
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-MODELS_JSON = os.getenv('MODELS_JSON')  # e.g. '{"iphone 16 pro": 325000, ... }'
-GLOBAL_MAX = int(os.getenv('GLOBAL_MAX')) if os.getenv('GLOBAL_MAX') else None
-REGION_PATH = os.getenv('REGION_PATH', 'astana')
-INTERVAL = int(os.getenv('INTERVAL_SECONDS', '300'))
-DATABASE_URL = os.getenv('DATABASE_URL')  # Railway Postgres URL, optional
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')  # <-- ставьте токен в Railway Variables
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')  # <-- ставьте chat_id в Railway Variables (1806974839)
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    logging.error("TELEGRAM_TOKEN and TELEGRAM_CHAT_ID must be set in env vars.")
+    logging.error("TELEGRAM_TOKEN and TELEGRAM_CHAT_ID must be set in environment variables.")
     raise SystemExit(1)
 
-# default models (will be overridden by MODELS_JSON if provided)
-DEFAULT_MODELS = {
+# остальные настройки (можно переопределить через env)
+REGION_PATH = os.getenv('REGION_PATH', 'astana')
+INTERVAL = int(os.getenv('INTERVAL_SECONDS', '300'))
+GLOBAL_MAX = int(os.getenv('GLOBAL_MAX')) if os.getenv('GLOBAL_MAX') else None
+
+MODELS = json.loads(os.getenv('MODELS_JSON')) if os.getenv('MODELS_JSON') else {
     "iphone 16 pro": 325000,
     "iphone 16 pro max": 325000,
     "iphone 16 plus": 280000,
@@ -64,46 +39,12 @@ DEFAULT_MODELS = {
     "iphone 13": 90000
 }
 
-if MODELS_JSON:
-    try:
-        MODELS = json.loads(MODELS_JSON)
-    except Exception:
-        logging.exception("MODELS_JSON parse error — using defaults")
-        MODELS = DEFAULT_MODELS
-else:
-    MODELS = DEFAULT_MODELS
-
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
 ]
 
 price_re = re.compile(r'(\d[\d\s\u00A0]*)')
-
-# DB layer: use Postgres if DATABASE_URL provided and psycopg2 available, otherwise SQLite
-use_postgres = DATABASE_URL and psycopg2 is not None
-
-if use_postgres:
-    logging.info("Using Postgres DB from DATABASE_URL")
-    pg_conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    pg_conn.autocommit = True
-    with pg_conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS seen (
-                id TEXT PRIMARY KEY,
-                title TEXT,
-                price INTEGER,
-                url TEXT,
-                seen_at TIMESTAMP
-            )
-        """)
-else:
-    DB_FILE = os.getenv('SQLITE_FILE', 'seen.db')
-    logging.info("Using SQLite DB file: %s", DB_FILE)
-    sqlite_conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    sc = sqlite_conn.cursor()
-    sc.execute('CREATE TABLE IF NOT EXISTS seen(id TEXT PRIMARY KEY, title TEXT, price INTEGER, url TEXT, seen_at TEXT)')
-    sqlite_conn.commit()
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -114,9 +55,9 @@ def send_telegram(text):
     except Exception:
         logging.exception("Telegram send failed")
 
-def build_search_url(query, page=1):
+def build_search_url(query):
     q = quote_plus(query)
-    return f"https://www.olx.kz/d/{REGION_PATH}/q-{q}/?page={page}"
+    return f"https://www.olx.kz/d/{REGION_PATH}/q-{q}/"
 
 def parse_price(text):
     if not text:
@@ -135,51 +76,27 @@ def extract_listings(html):
     items = []
     for a in soup.find_all('a', href=True):
         title = a.get_text(separator=' ', strip=True)
-        if not title:
-            continue
-        if 'iphone' not in title.lower():
+        if not title or 'iphone' not in title.lower():
             continue
         href = a['href']
         if href.startswith('/'):
             href = urljoin("https://www.olx.kz", href)
-        # try to find price in parent text
-        try:
-            parent = a.parent
-            parent_text = parent.get_text(separator=' ', strip=True)
-        except Exception:
-            parent_text = title
+        parent_text = a.parent.get_text(separator=' ', strip=True) if a.parent else title
         price = parse_price(parent_text) or parse_price(title)
         id_match = re.search(r'(\d{6,})', href)
         lid = id_match.group(1) if id_match else href
         items.append({'id': lid, 'title': title, 'price': price, 'url': href})
     # dedupe
     uniq = []
-    seen_ids = set()
+    seen = set()
     for it in items:
-        if it['id'] in seen_ids:
-            continue
-        seen_ids.add(it['id'])
+        if it['id'] in seen: continue
+        seen.add(it['id'])
         uniq.append(it)
     return uniq
 
-def already_seen(lid):
-    if use_postgres:
-        with pg_conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM seen WHERE id=%s", (lid,))
-            return cur.fetchone() is not None
-    else:
-        sc.execute('SELECT 1 FROM seen WHERE id=?', (lid,))
-        return sc.fetchone() is not None
-
-def mark_seen(item):
-    if use_postgres:
-        with pg_conn.cursor() as cur:
-            cur.execute("INSERT INTO seen(id, title, price, url, seen_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-                        (item['id'], item['title'], item['price'] or 0, item['url'], datetime.utcnow()))
-    else:
-        sc.execute('INSERT OR IGNORE INTO seen(id, title, price, url, seen_at) VALUES (?, ?, ?, ?, ?)',
-                   (item['id'], item['title'], item['price'] or 0, item['url'], datetime.utcnow().isoformat()))
-        sqlite_conn.commit()
+# Простой in-memory "seen" — при перезапуске на Railway используйте Postgres (DATABASE_URL)
+seen = set()
 
 def check_model(model, threshold):
     url = build_search_url(model)
@@ -190,20 +107,17 @@ def check_model(model, threshold):
     except Exception:
         logging.exception("Failed to fetch %s", url)
         return
-    listings = extract_listings(r.text)
-    for it in listings:
+    for it in extract_listings(r.text):
         price = it['price']
-        if price is None:
-            continue
+        if price is None: continue
         match_thresh = threshold
         if GLOBAL_MAX is not None and price <= GLOBAL_MAX:
             match_thresh = GLOBAL_MAX
-        if price <= match_thresh:
-            if not already_seen(it['id']):
-                text = f"НАЙДЕНО: <b>{it['title']}</b>\nЦена: {price}\nИскали: {model}\n{it['url']}"
-                logging.info("ALERT: %s", text)
-                send_telegram(text)
-                mark_seen(it)
+        if price <= match_thresh and it['id'] not in seen:
+            text = f"НАЙДЕНО: <b>{it['title']}</b>\nЦена: {price}\nМодель поиска: {model}\n{it['url']}"
+            logging.info("ALERT: %s", text)
+            send_telegram(text)
+            seen.add(it['id'])
 
 def main_loop():
     logging.info("Monitor started. Models: %s  global_max=%s", list(MODELS.keys()), GLOBAL_MAX)
