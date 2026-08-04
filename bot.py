@@ -98,7 +98,7 @@ def parse_json_from_html(html: str) -> list[dict]:
     return []
 
 def parse_html_cards(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "lxml")
+    soup = BeautifulSoup(html, "html.parser")
     results = []
     cards = soup.select("div[data-cy='l-card'], div[data-testid='listing-grid'] > div")
     logger.info(f"HTML cards found: {len(cards)}")
